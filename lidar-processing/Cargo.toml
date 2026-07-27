@@ -8,3 +8,7 @@ edition = "2021"
 [dependencies]
 las = {version = "0.7.6", features = ["laz"]}
 rand = "0.8.5"
+
+[[bin]]
+name = "test_bounds"
+path = "src/test_bounds.rs"
