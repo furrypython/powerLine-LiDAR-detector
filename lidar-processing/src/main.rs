@@ -28,32 +28,52 @@ fn execute_algorithms(input: &String, output: &String) {
 
     //Histogram based filtering
     let now = time::Instant::now();
-    let filtered = histogram::histogram_filter(&gridded, 6, 4, 4, 7, 30);
+    let filtered = histogram::histogram_filter(&gridded, 6, 2, 4, 7, 30);
     println!("Local Histogram Filtering time: {:?} millisecs.", now.elapsed().as_millis());
 
     let binary = morph::convert_to_binary(&filtered);
+    let mut count = 0;
+    for r in &binary { for &v in r { if v { count += 1; } } }
+    println!("DEBUG: binary cells: {}", count);
    
     //Morphological operations
     let now = time::Instant::now();
     
     let eroded4 = morph::erode(&binary,0);
+    let mut count = 0;
+    for r in &eroded4 { for &v in r { if v { count += 1; } } }
+    println!("DEBUG: eroded4 cells: {}", count);
+
     let eroded32 = morph::erode(&eroded4,5);
+    let mut count = 0;
+    for r in &eroded32 { for &v in r { if v { count += 1; } } }
+    println!("DEBUG: eroded32 cells: {}", count);
     
     let dilated = morph::dilate(&eroded32);
+    let mut count = 0;
+    for r in &dilated { for &v in r { if v { count += 1; } } }
+    println!("DEBUG: dilated cells: {}", count);
     
-    let eroded4 = morph::erode(&dilated, 0);
-    let eroded32 = morph::erode(&eroded4, 4);
+    let eroded4_2 = morph::erode(&dilated, 0);
+    let mut count = 0;
+    for r in &eroded4_2 { for &v in r { if v { count += 1; } } }
+    println!("DEBUG: eroded4_2 cells: {}", count);
+
+    let eroded32_2 = morph::erode(&eroded4_2, 4);
+    let mut count = 0;
+    for r in &eroded32_2 { for &v in r { if v { count += 1; } } }
+    println!("DEBUG: eroded32_2 cells: {}", count);
     
     println!("Morphological operations time: {:?} millisecs.", now.elapsed().as_millis());
 
     //Graph based filtering
     let now = time::Instant::now();
-    let conn_comps = graph::filter_conn_components(&eroded32, 18., 30);
+    let conn_comps = graph::filter_conn_components(&eroded32_2, 5.0, 10);
     println!("Connected Components Filtering time: {:?} millisecs.", now.elapsed().as_millis());
 
     //Density voxel filtering
     let now = time::Instant::now();
-    let result = grid::create_result(&conn_comps, &gridded, 45);
+    let result = grid::create_result(&conn_comps, &gridded, 100);
     println!("Density voxel Filtering time: {:?} millisecs.", now.elapsed().as_millis());
     
     //Writing output file
