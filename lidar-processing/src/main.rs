@@ -28,7 +28,7 @@ fn execute_algorithms(input: &String, output: &String) {
 
     //Histogram based filtering
     let now = time::Instant::now();
-    let filtered = histogram::histogram_filter(&gridded, 6, 2, 4, 7, 30);
+    let filtered = histogram::histogram_filter(&gridded, 2, 2, 4, 7, 30);
     println!("Local Histogram Filtering time: {:?} millisecs.", now.elapsed().as_millis());
 
     let binary = morph::convert_to_binary(&filtered);
@@ -73,7 +73,7 @@ fn execute_algorithms(input: &String, output: &String) {
 
     //Density voxel filtering
     let now = time::Instant::now();
-    let result = grid::create_result(&conn_comps, &gridded, 100);
+    let result = grid::create_result(&conn_comps, &filtered, 100);
     println!("Density voxel Filtering time: {:?} millisecs.", now.elapsed().as_millis());
     
     //Writing output file

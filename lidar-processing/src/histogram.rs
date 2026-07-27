@@ -37,24 +37,28 @@ fn process_cell(point_cell: &Vec<Point>, min_density: usize, empty:usize , non_e
     let mut count_empty = 0;
     let mut total_count_non_empty = 0;
     
-    let max_z = point_cell.iter().map(|p| p.z).fold(f64::NAN, f64::max);
-    let min_z = point_cell.iter().map(|p| p.z).fold(f64::NAN, f64::min);
+    let mut gap_start_i = 0; // NEW: track where the gap begins!
+
+    let max_z = point_cell.iter().map(|p| p.z).fold(std::f64::NAN, |a,b| a.max(b));
+    let min_z = point_cell.iter().map(|p| p.z).fold(std::f64::NAN, |a,b| a.min(b));
     for i in 0..end {
         if (max_z - (i as f64)) > min_z{
-            let density = point_cell.iter().filter          //Number of points in height range
+            let density = point_cell.iter().filter
                     (|p| p.z <= max_z - (i as f64) && p.z > max_z - (i as f64 + 1.)).count();
             
-            if density > min_density {      //Height range is not empty
+            if density > min_density {
                 count_non_empty += 1;
                 total_count_non_empty += 1;
                 count_empty = 0;
-            
-            } else {    //Height range is empty
+            } else {
+                if count_empty == 0 {
+                    gap_start_i = i; // The gap started at this slice
+                }
                 count_empty += 1;
                 count_non_empty = 0;
             }
 
-            if count_non_empty >= non_empty_cont || total_count_non_empty >= non_empty {    //Multiple non empty height range (cell is not candidate)
+            if count_non_empty >= non_empty_cont || total_count_non_empty >= non_empty {
                 break;
             }
 
@@ -63,14 +67,15 @@ fn process_cell(point_cell: &Vec<Point>, min_density: usize, empty:usize , non_e
                 break;
             }
         }
-        
         else {
             break;
         }
     }
 
     if candidate {
-        for point in point_cell.iter().filter(|p| p.z > max_z - 20.){
+        // ONLY keep points above the empty gap! Add a small 1m buffer to catch drooping points.
+        let cutoff_z = max_z - (gap_start_i as f64) - 1.0;
+        for point in point_cell.iter().filter(|p| p.z > cutoff_z){
             cell.push(point.clone());
         }
     }
