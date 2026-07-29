@@ -21,6 +21,7 @@ pub fn read_las(input: &String) -> (Reader, raw::Header)  {
 //Writes into file all point cloud
 pub fn write_las(point_cloud: &Vec<Vec<Vec<las::Point>>>, raw_header: raw::Header, output: &String) {
     let mut writer = Writer::from_path(output, las::Header::from_raw(raw_header).unwrap()).unwrap();
+    let format = *writer.header().point_format();
 
     for i in 0..point_cloud.len(){
         for j in 0..point_cloud[i].len(){
@@ -29,6 +30,12 @@ pub fn write_las(point_cloud: &Vec<Vec<Vec<las::Point>>>, raw_header: raw::Heade
                     let mut point = point.clone();
                     if point.return_number > 5 {
                         point.return_number = 5;
+                    }
+                    if format.has_gps_time && point.gps_time.is_none() {
+                        point.gps_time = Some(0.0);
+                    }
+                    if format.has_nir && point.nir.is_none() {
+                        point.nir = Some(0);
                     }
                     if point.classification != Classification::Ground {
                         writer.write(point.clone()).unwrap();
