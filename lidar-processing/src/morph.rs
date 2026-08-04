@@ -217,39 +217,27 @@ pub fn dilate(filtered: &Vec<Vec<bool>>) -> Vec<Vec<bool>> {
     
     for i in 1..padded.len() - 1{
         for j in 1..padded[i].len() - 1 {
-            let mut has_neighbour = false;
-            let min_neighbours = 
-                if i == 1 || j == 1 || i == (padded.len() - 2) || j == (padded[i].len() - 2) { //Border cells
-                    1
-                }
-                else {
-                    2
-                };
-
-            for k in j-1..j+2 {
-                if ((padded[i-1][k] == true ) as i32 
-                    + (padded[i+1][k] == true ) as i32 
-                ) >= min_neighbours {
-                    has_neighbour = true;
-                    break;
-                }
+            if padded[i][j] == true {
+                dilated[i-1][j-1] = true;
+                continue;
             }
             
-            if !has_neighbour {
-                if ((padded[i][j-1] == true ) as i32 
-                    + (padded[i][j+1] == true ) as i32 
-                ) >= min_neighbours {
-                    has_neighbour = true;
-                }
-            }  
+            let mut fill_gap = false;
+            if padded[i-1][j] == true && padded[i+1][j] == true {
+                fill_gap = true;
+            }
+            else if padded[i][j-1] == true && padded[i][j+1] == true {
+                fill_gap = true;
+            }
+            else if padded[i-1][j-1] == true && padded[i+1][j+1] == true {
+                fill_gap = true;
+            }
+            else if padded[i-1][j+1] == true && padded[i+1][j-1] == true {
+                fill_gap = true;
+            }
 
-            match has_neighbour {
-                true => {
-                    dilated[i-1][j-1] = true;
-                },
-                false => {
-                    dilated[i-1][j-1] = false;
-                }
+            if fill_gap {
+                dilated[i-1][j-1] = true;
             }
         }
     }

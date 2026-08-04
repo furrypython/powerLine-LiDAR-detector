@@ -14,6 +14,10 @@ pub fn grid_division(file_header: &Header, point_cloud: Vec<Point>,cell_size: f6
     let mut grid_size_x = ((max_x - min_x)/cell_size).ceil() as usize;
     let mut grid_size_y = ((max_y - min_y)/cell_size).ceil() as usize;
     
+    println!("Grid sizes computed: {}x{}", grid_size_x, grid_size_y);
+    println!("X range: {} to {}, diff: {}", min_x, max_x, max_x - min_x);
+    println!("Y range: {} to {}, diff: {}", min_y, max_y, max_y - min_y);
+    
     if grid_size_x == 0 { grid_size_x = 1; }
     if grid_size_y == 0 { grid_size_y = 1; }
     
@@ -26,8 +30,8 @@ pub fn grid_division(file_header: &Header, point_cloud: Vec<Point>,cell_size: f6
     }
 
     for point in point_cloud {
-        let mut i = ((point.x - min_x) / cell_size).floor() as usize;
-        let mut j = ((point.y - min_y) / cell_size).floor() as usize;
+        let mut i = if point.x < min_x { 0 } else { ((point.x - min_x) / cell_size).floor() as usize };
+        let mut j = if point.y < min_y { 0 } else { ((point.y - min_y) / cell_size).floor() as usize };
         
         if i >= grid_size_x { i = grid_size_x - 1; }
         if j >= grid_size_y { j = grid_size_y - 1; }
