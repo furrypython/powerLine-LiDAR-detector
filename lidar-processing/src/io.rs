@@ -19,7 +19,7 @@ pub fn read_las(input: &String) -> (Reader, raw::Header)  {
 //---------------------------------------WRITING-------------------------------------------
 
 //Writes into file all point cloud
-pub fn write_las(point_cloud: &Vec<Vec<Vec<las::Point>>>, raw_header: raw::Header, output: &String) {
+pub fn write_las(point_cloud: &Vec<Vec<Vec<las::Point>>>, raw_header: raw::Header, output: &String, original_bounds: las::Bounds) {
     let mut writer = Writer::from_path(output, las::Header::from_raw(raw_header).unwrap()).unwrap();
     let format = *writer.header().point_format();
 
@@ -27,6 +27,12 @@ pub fn write_las(point_cloud: &Vec<Vec<Vec<las::Point>>>, raw_header: raw::Heade
         for j in 0..point_cloud[i].len(){
             if point_cloud[i][j].len() > 0{
                 for point in &point_cloud[i][j]{
+                    // Filter points outside original bounds
+                    if point.x < original_bounds.min.x || point.x > original_bounds.max.x ||
+                       point.y < original_bounds.min.y || point.y > original_bounds.max.y {
+                        continue;
+                    }
+
                     let mut point = point.clone();
                     if point.return_number > 5 {
                         point.return_number = 5;
