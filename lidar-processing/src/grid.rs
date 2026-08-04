@@ -9,31 +9,30 @@ pub fn grid_division(file_header: &Header, point_cloud: Vec<Point>,cell_size: f6
     let min_x = file_header.bounds().min.x;
     let min_y = file_header.bounds().min.y;
     let max_x = file_header.bounds().max.x;
+    let max_y = file_header.bounds().max.y;
 
-    let divisions_x = cell_size;
-    let divisions_y = cell_size;
-
-    let grid_size = ((max_x - min_x)/divisions_x).ceil() as usize;
+    let mut grid_size_x = ((max_x - min_x)/cell_size).ceil() as usize;
+    let mut grid_size_y = ((max_y - min_y)/cell_size).ceil() as usize;
+    
+    if grid_size_x == 0 { grid_size_x = 1; }
+    if grid_size_y == 0 { grid_size_y = 1; }
     
     let mut grids:Vec<Vec<Vec<Point>>> = Vec::new();
-    for i in 0..grid_size{
+    for i in 0..grid_size_x{
         grids.push(Vec::new());
-        for _ in 0..grid_size{
+        for _ in 0..grid_size_y{
             grids[i].push(Vec::new());
         }
     }
 
-    'outer: for point in point_cloud {
-        for i in 0..grid_size {
-            if point.x >= (divisions_x*i as f64) + min_x && point.x < (divisions_x*(i+1) as f64) + min_x{
-                for j in 0..grid_size{
-                    if point.y >= (divisions_y*j as f64) + min_y && point.y < (divisions_y*(j+1) as f64) + min_y {
-                        grids[i][j].push(point);
-                        continue 'outer;
-                    }
-                }
-            } 
-        }
+    for point in point_cloud {
+        let mut i = ((point.x - min_x) / cell_size).floor() as usize;
+        let mut j = ((point.y - min_y) / cell_size).floor() as usize;
+        
+        if i >= grid_size_x { i = grid_size_x - 1; }
+        if j >= grid_size_y { j = grid_size_y - 1; }
+        
+        grids[i][j].push(point);
     }
     grids
 }
