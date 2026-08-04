@@ -54,13 +54,13 @@ pub fn create_result(cells_list: &Vec<(usize, usize)>, point_cloud: &Vec<Vec<Vec
     }
     let mut mean_density = 0;
     let mut count = 0;
-    for i in 0..result.len() {
-        for j in 0..result[i].len() {
-            if result[i][j].len() > 0 {
-                let max_z = result[i][j].iter().map(|p| p.z).fold(f64::NAN, f64::max);
-                let min_z = result[i][j].iter().map(|p| p.z).fold(f64::NAN, f64::min);
+    for i in 0..point_cloud.len() {
+        for j in 0..point_cloud[i].len() {
+            if point_cloud[i][j].len() > 0 {
+                let max_z = point_cloud[i][j].iter().map(|p| p.z).fold(f64::NAN, f64::max);
+                let min_z = point_cloud[i][j].iter().map(|p| p.z).fold(f64::NAN, f64::min);
                 for x in min_z as i32..=max_z as i32 {
-                    let density = result[i][j].iter().filter          //Number of points in height range
+                    let density = point_cloud[i][j].iter().filter          //Number of points in height range
                     (|p| p.z >= x as f64 && p.z < x as f64 + 1.).count();
                     if density > 0 {
                         mean_density += density;
@@ -79,7 +79,7 @@ pub fn create_result(cells_list: &Vec<(usize, usize)>, point_cloud: &Vec<Vec<Vec
                 for w in min_z as i32..=max_z as i32 {
                     if result[i][j].iter().filter
                     (|p| p.z >= w as f64 && p.z < w as f64 + 1.).count() > mean_density + density_thres {
-                        result[i][j].retain(|x| x.z > w as f64 + 1.);
+                        result[i][j].retain(|x| x.z < w as f64 || x.z >= w as f64 + 1.);
                     }
                 }
             }

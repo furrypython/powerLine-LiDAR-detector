@@ -28,7 +28,7 @@ fn execute_algorithms(input: &String, output: &String) {
 
     //Histogram based filtering
     let now = time::Instant::now();
-    let filtered = histogram::histogram_filter(&gridded, 2, 2, 4, 7, 30);
+    let filtered = histogram::histogram_filter(&gridded, 0, 2, 4, 7, 30);
     println!("Local Histogram Filtering time: {:?} millisecs.", now.elapsed().as_millis());
 
     let binary = morph::convert_to_binary(&filtered);
@@ -39,7 +39,9 @@ fn execute_algorithms(input: &String, output: &String) {
     //Morphological operations
     let now = time::Instant::now();
     
-    let eroded4 = morph::erode(&binary,0);
+    let dilated_initial = morph::dilate(&binary);
+    
+    let eroded4 = morph::erode(&dilated_initial,0);
     let mut count = 0;
     for r in &eroded4 { for &v in r { if v { count += 1; } } }
     println!("DEBUG: eroded4 cells: {}", count);
@@ -69,6 +71,7 @@ fn execute_algorithms(input: &String, output: &String) {
     //Graph based filtering
     let now = time::Instant::now();
     let conn_comps = graph::filter_conn_components(&eroded32_2, 5.0, 10);
+    println!("DEBUG: conn_comps cells: {}", conn_comps.len());
     println!("Connected Components Filtering time: {:?} millisecs.", now.elapsed().as_millis());
 
     //Density voxel filtering
