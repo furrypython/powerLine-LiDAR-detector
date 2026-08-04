@@ -2,14 +2,17 @@ use core::panic;
 
 use las::{Header, Point};
 
-pub fn grid_division(file_header: &Header, point_cloud: Vec<Point>,cell_size: f64) -> Vec<Vec<Vec<Point>>>{
+pub fn grid_division(point_cloud: Vec<Point>, cell_size: f64) -> (Vec<Vec<Vec<Point>>>, f64, f64, f64, f64) {
     if cell_size <= 0. {
         panic!("Grid division error. Cell_size must be greater than 0");
     }
-    let min_x = file_header.bounds().min.x;
-    let min_y = file_header.bounds().min.y;
-    let max_x = file_header.bounds().max.x;
-    let max_y = file_header.bounds().max.y;
+    if point_cloud.is_empty() {
+        return (Vec::new(), 0., 0., 0., 0.);
+    }
+    let min_x = point_cloud.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+    let min_y = point_cloud.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+    let max_x = point_cloud.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+    let max_y = point_cloud.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
 
     let mut grid_size_x = ((max_x - min_x)/cell_size).ceil() as usize;
     let mut grid_size_y = ((max_y - min_y)/cell_size).ceil() as usize;
@@ -38,7 +41,7 @@ pub fn grid_division(file_header: &Header, point_cloud: Vec<Point>,cell_size: f6
         
         grids[i][j].push(point);
     }
-    grids
+    (grids, min_x, min_y, max_x, max_y)
 }
 
 pub fn create_result(cells_list: &Vec<(usize, usize)>, point_cloud: &Vec<Vec<Vec<las::Point>>>, density_thres: usize) -> Vec<Vec<Vec<las::Point>>> {
