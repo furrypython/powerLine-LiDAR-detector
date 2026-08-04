@@ -80,16 +80,18 @@ def main():
     total_time = 0
     path = sys.argv[2]
     operation = sys.argv[1]
-    if operation == "-g":
-        if not os.path.exists(os.path.join(path, "grounds")):
-            os.makedirs(os.path.join(path, "grounds"))
-    elif operation == "-gt":
-        if not os.path.exists(os.path.join(path, "ground_truth")):
-            os.makedirs(os.path.join(path, "ground_truth"))
-    elif operation == "-r":
-        if not os.path.exists(os.path.join(path, "radial")):
-            os.makedirs(os.path.join(path, "radial"))
+    
     if isdir(path):
+        if operation == "-g":
+            if not os.path.exists(os.path.join(path, "grounds")):
+                os.makedirs(os.path.join(path, "grounds"))
+        elif operation == "-gt":
+            if not os.path.exists(os.path.join(path, "ground_truth")):
+                os.makedirs(os.path.join(path, "ground_truth"))
+        elif operation == "-r":
+            if not os.path.exists(os.path.join(path, "radial")):
+                os.makedirs(os.path.join(path, "radial"))
+
         for _root, _dirs, list_of_files in os.walk(path):
             for file in list_of_files:
                 if not file.endswith(".laz") and not file.endswith(".las"):
@@ -116,9 +118,21 @@ def main():
 
     elif isfile(path):
         filename = os.path.basename(path)
-        g_string = GROUND[:59] + path + GROUND[59:-10] + os.path.dirname(path) + "/no_grounds/G_" + filename + GROUND[-10:]
-        gt_string = GROUND_TRUTH[:59] + path + GROUND_TRUTH[59:-50] + os.path.dirname(path) + "/ground_truth/GROUND_TRUTH_" + filename + GROUND_TRUTH[-50:]
-        r_string = RADIAL_DENSITY[:59] + path + RADIAL_DENSITY[59:-10] + os.path.dirname(path) + "/radial/RD_" + filename + RADIAL_DENSITY[-10:]
+        dir_path = os.path.dirname(path)
+
+        if operation == "-g":
+            if not os.path.exists(os.path.join(dir_path, "no_grounds")):
+                os.makedirs(os.path.join(dir_path, "no_grounds"))
+        elif operation == "-gt":
+            if not os.path.exists(os.path.join(dir_path, "ground_truth")):
+                os.makedirs(os.path.join(dir_path, "ground_truth"))
+        elif operation == "-r":
+            if not os.path.exists(os.path.join(dir_path, "radial")):
+                os.makedirs(os.path.join(dir_path, "radial"))
+
+        g_string = GROUND[:59] + path + GROUND[59:-10] + dir_path + "/no_grounds/G_" + filename + GROUND[-10:]
+        gt_string = GROUND_TRUTH[:59] + path + GROUND_TRUTH[59:-50] + dir_path + "/ground_truth/GROUND_TRUTH_" + filename + GROUND_TRUTH[-50:]
+        r_string = RADIAL_DENSITY[:59] + path + RADIAL_DENSITY[59:-10] + dir_path + "/radial/RD_" + filename + RADIAL_DENSITY[-10:]
 
         if operation == "-g":
             ground = pdal.Pipeline(g_string)
