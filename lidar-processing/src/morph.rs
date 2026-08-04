@@ -159,11 +159,13 @@ fn erode_neighborhood(point_cloud: &Vec<Vec<bool>>, padding: usize) -> Vec<Vec<b
                     }
 
                     for l in j-padding..j {
-                        if padded[i][l] == true  {
-                            neighbours_per_level[l-(j-padding)] += 1;
-                        }
-                        if padded[i][j+padding-(j-l)] == true  {
-                            neighbours_per_level[l-(j-padding)] += 1;
+                        for k in i-padding..i+padding+1 {
+                            if padded[k][l] == true  {
+                                neighbours_per_level[l-(j-padding)] += 1;
+                            }
+                            if padded[k][j+padding-(j-l)] == true  {
+                                neighbours_per_level[l-(j-padding)] += 1;
+                            }
                         }
                     }
                     
