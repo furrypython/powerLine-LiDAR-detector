@@ -7,6 +7,7 @@ mod morph;
 mod graph;
 mod ground;
 mod grid;
+mod pca;
 
 //----------------------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------------------
@@ -42,68 +43,16 @@ fn execute_algorithms(input: &String, output: &String, all_files: &Vec<(String, 
     }
 
     println!("Ground Reduction & Buffer Loading time: {:?} millisecs.", now.elapsed().as_millis());
-
-    //Grid Division
+    
+    // PCA Linearity Filtering
     let now = time::Instant::now();
-    let (gridded, _, _, _, _) = grid::grid_division(combined_points, 7.5);
-    println!("Grid division time: {:?} millisecs.", now.elapsed().as_millis());
+    let linear_points = pca::filter_by_linearity(&combined_points, 20, 0.85); // k=20, threshold=0.85
+    println!("PCA Linearity Filtering time: {:?} millisecs. Extracted {} points from {} total.", now.elapsed().as_millis(), linear_points.len(), combined_points.len());
 
-    //Histogram based filtering
-    let now = time::Instant::now();
-    let filtered = histogram::histogram_filter(&gridded, 0, 2, 4, 7, 30);
-    println!("Local Histogram Filtering time: {:?} millisecs.", now.elapsed().as_millis());
-
-    let binary = morph::convert_to_binary(&filtered);
-    let mut count = 0;
-    for r in &binary { for &v in r { if v { count += 1; } } }
-    println!("DEBUG: binary cells: {}", count);
-   
-    //Morphological operations
-    let now = time::Instant::now();
-    
-    let dilated_initial = morph::dilate(&binary);
-    
-    let eroded4 = morph::erode(&dilated_initial,0);
-    let mut count = 0;
-    for r in &eroded4 { for &v in r { if v { count += 1; } } }
-    println!("DEBUG: eroded4 cells: {}", count);
-
-    let eroded32 = morph::erode(&eroded4,5);
-    let mut count = 0;
-    for r in &eroded32 { for &v in r { if v { count += 1; } } }
-    println!("DEBUG: eroded32 cells: {}", count);
-    
-    let dilated = morph::dilate(&eroded32);
-    let mut count = 0;
-    for r in &dilated { for &v in r { if v { count += 1; } } }
-    println!("DEBUG: dilated cells: {}", count);
-    
-    let eroded4_2 = morph::erode(&dilated, 0);
-    let mut count = 0;
-    for r in &eroded4_2 { for &v in r { if v { count += 1; } } }
-    println!("DEBUG: eroded4_2 cells: {}", count);
-
-    let eroded32_2 = morph::erode(&eroded4_2, 4);
-    let mut count = 0;
-    for r in &eroded32_2 { for &v in r { if v { count += 1; } } }
-    println!("DEBUG: eroded32_2 cells: {}", count);
-    
-    println!("Morphological operations time: {:?} millisecs.", now.elapsed().as_millis());
-
-    //Graph based filtering
-    let now = time::Instant::now();
-    let conn_comps = graph::filter_conn_components(&eroded32_2, 5.0, 10);
-    println!("DEBUG: conn_comps cells: {}", conn_comps.len());
-    println!("Connected Components Filtering time: {:?} millisecs.", now.elapsed().as_millis());
-
-    //Density voxel filtering
-    let now = time::Instant::now();
-    let result = grid::create_result(&conn_comps, &filtered, 100);
-    println!("Density voxel Filtering time: {:?} millisecs.", now.elapsed().as_millis());
-    
+    // Skip the old heuristic pipeline and write the mathematically identified wires directly!
     //Writing output file
     let now = time::Instant::now();
-    io::write_las(&result, readed_items.1, output, original_bounds);
+    io::write_las_flat(&linear_points, readed_items.1, output, original_bounds);
     println!("Writing time: {:?} millisecs.", now.elapsed().as_millis());
 }
 
