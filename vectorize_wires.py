@@ -4,47 +4,72 @@ import numpy as np
 import laspy
 from sklearn.cluster import DBSCAN
 import random
+from scipy.spatial import cKDTree
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import minimum_spanning_tree
 
 def generate_random_color():
     """Generates a random RGB color."""
     return [random.randint(50, 255) for _ in range(3)]
 
-def extract_polyline(points, bin_size=1.0):
+def voxel_downsample(points, voxel_size):
+    """Downsamples a point cloud using a voxel grid, returning the centroid of each voxel."""
+    voxel_indices = np.floor(points / voxel_size).astype(np.int32)
+    unique_voxels, inverse_indices = np.unique(voxel_indices, axis=0, return_inverse=True)
+    
+    downsampled_points = np.zeros((len(unique_voxels), 3))
+    counts = np.zeros(len(unique_voxels))
+    
+    np.add.at(downsampled_points, inverse_indices, points)
+    np.add.at(counts, inverse_indices, 1)
+    
+    downsampled_points /= counts[:, np.newaxis]
+    return downsampled_points
+
+def extract_skeleton(points, voxel_size=1.0, max_edge_length=5.0):
     """
-    Fits a smooth 1D polyline through a cluster of 3D LiDAR points.
-    It uses PCA to find the principal direction (wire length), projects
-    the points, and averages them inside evenly spaced bins.
+    Extracts a 3D skeleton from a cluster of points using a Minimum Spanning Tree.
+    This preserves parallel wires and droppers.
     """
     if len(points) < 2:
-        return points
+        return points, []
 
-    # 1. PCA to find the main direction of the wire
-    centroid = np.mean(points, axis=0)
-    centered_points = points - centroid
-    
-    # Use SVD to compute PCA
-    U, S, Vt = np.linalg.svd(centered_points, full_matrices=False)
-    main_axis = Vt[0]
+    # 1. Downsample points to create graph nodes
+    nodes = voxel_downsample(points, voxel_size)
+    if len(nodes) < 2:
+        return nodes, []
 
-    # 2. Project points onto the main axis
-    projections = np.dot(centered_points, main_axis)
+    # 2. Build nearest neighbor graph
+    tree = cKDTree(nodes)
+    pairs = tree.query_pairs(r=max_edge_length)
     
-    # 3. Sort and bin points along the axis to create a smooth single line
-    min_proj = np.min(projections)
-    max_proj = np.max(projections)
+    if not pairs:
+        return nodes, []
+
+    # Build sparse matrix for graph
+    row = []
+    col = []
+    data = []
+    for i, j in pairs:
+        dist = np.linalg.norm(nodes[i] - nodes[j])
+        row.append(i)
+        col.append(j)
+        data.append(dist)
+        # Undirected graph
+        row.append(j)
+        col.append(i)
+        data.append(dist)
+        
+    graph = csr_matrix((data, (row, col)), shape=(len(nodes), len(nodes)))
     
-    # Create bins along the wire
-    bins = np.arange(min_proj, max_proj + bin_size, bin_size)
+    # 3. Compute Minimum Spanning Tree
+    mst = minimum_spanning_tree(graph)
     
-    polyline_vertices = []
-    for i in range(len(bins) - 1):
-        mask = (projections >= bins[i]) & (projections < bins[i+1])
-        pts_in_bin = points[mask]
-        if len(pts_in_bin) > 0:
-            bin_centroid = np.mean(pts_in_bin, axis=0)
-            polyline_vertices.append(bin_centroid)
-            
-    return np.array(polyline_vertices)
+    # Extract edges from MST
+    mst_coo = mst.tocoo()
+    edges = np.vstack((mst_coo.row, mst_coo.col)).T
+    
+    return nodes, edges
 
 def write_ply(filepath, vertices, edges, colors=None):
     """Writes vertices and edges to an ASCII .ply file."""
@@ -132,32 +157,28 @@ def main():
     for wire_id in unique_labels:
         wire_points = points[labels == wire_id]
         
-        # Collapse the thick point cloud into a clean, ordered 1D polyline
-        polyline = extract_polyline(wire_points, bin_size=args.bin_size)
+        # Extract skeleton preserving topology (parallel lines and droppers)
+        # Use DBSCAN eps * 2 as a safe max_edge_length to connect components
+        vertices, wire_edges = extract_skeleton(wire_points, voxel_size=args.bin_size, max_edge_length=args.eps * 2)
         
-        if len(polyline) < 2:
+        if len(vertices) < 2 or len(wire_edges) == 0:
             continue # Skip noise clusters too small to form a line
             
         wire_color = generate_random_color()
         
-        # Create edge index connections (0 -> 1, 1 -> 2, etc.)
-        wire_edges = []
-        for i in range(len(polyline) - 1):
-            wire_edges.append([i, i + 1])
-            
         # Write individual wire to its own PLY file
         ind_filepath = os.path.join(individual_dir, f"wire_{wire_id}.ply")
-        write_ply(ind_filepath, polyline, wire_edges)
+        write_ply(ind_filepath, vertices, wire_edges)
         
         # Append to consolidated data
-        for v in polyline:
+        for v in vertices:
             consolidated_vertices.append(v)
             consolidated_colors.append(wire_color)
             
         for e in wire_edges:
             consolidated_edges.append([e[0] + current_vertex_offset, e[1] + current_vertex_offset])
             
-        current_vertex_offset += len(polyline)
+        current_vertex_offset += len(vertices)
         
     # 4. Save consolidated multi-colored file
     print(f"Saving consolidated file...")
