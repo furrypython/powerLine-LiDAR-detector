@@ -79,7 +79,25 @@ python src/ground_seg.py -g <input>
 ./rust_module/target/release/pl-detector <input> <output>
 ```
 
-### 3️⃣ Metrics calculation
+### 3️⃣ Vectorization (Convert Points to Polylines)
+
+After extracting the power line points with the Rust module, you can optionally vectorize the point cloud into explicit 3D lines (`.ply` format). This will cluster separate wires and create continuous polylines.
+
+```bash
+python vectorize_wires.py <input.las> <output_directory>
+```
+
+**Parameters (Optional):**
+- `--eps`: Distance for clustering wires (default: `2.0` meters)
+- `--min_samples`: Minimum points needed to form a wire (default: `10`)
+- `--bin_size`: Spacing between the generated line vertices (default: `1.0` meters)
+
+Example:
+```bash
+python vectorize_wires.py outputs/filtered.las outputs/vectorized/ --eps 1.5 --bin_size 0.5
+```
+
+### 4️⃣ Metrics calculation
 
 ```bash
 ./rust_module/target/release/metrics <processed_tiles_folder> <ground_truth_tiles_folder> <original_tiles_folder>
