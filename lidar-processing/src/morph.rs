@@ -37,10 +37,11 @@ fn empty_vector(num: usize) -> Vec<bool> {
 fn create_padded_point_cloud(point_cloud: &Vec<Vec<bool>>, padding: usize) -> Vec<Vec<bool>> {
     let mut padded_point_cloud: Vec<Vec<bool>> = Vec::new();
     let empty_cells: Vec<bool> = empty_vector(padding);
+    let cols = if point_cloud.is_empty() { 0 } else { point_cloud[0].len() };
 
     for i in 0..padding { //Add padding rows to the top
         padded_point_cloud.push(Vec::new());
-        for _ in 0..(point_cloud[i].len() + padding*2) {
+        for _ in 0..(cols + padding*2) {
             padded_point_cloud[i].push(false);
         }
     }
@@ -60,7 +61,7 @@ fn create_padded_point_cloud(point_cloud: &Vec<Vec<bool>>, padding: usize) -> Ve
 
     for i in padding..padding*2 { //Add padding rows to the bottom
         padded_point_cloud.push(Vec::new());
-        for _ in 0..(point_cloud[i].len() + padding*2) {
+        for _ in 0..(cols + padding*2) {
             padded_point_cloud[point_cloud.len()+i].push(false);
         }
     }
@@ -74,7 +75,7 @@ fn erode_4(point_cloud: &Vec<Vec<bool>>) -> Vec<Vec<bool>> {
     
     for i in 1..padded.len() - 1 {
         for j in 1..padded[i].len() - 1 {
-            // At least 1 neighbour in the neighbourhood (top, bottom, right, left)
+            // At least 1 neighbour in the neighbourhood (top, bottom, right, left, diagonals)
             if  padded[i][j] == true {
                 let min_neighbours = 
                     if i == 1 || j == 1 || i == (padded.len() - 2) || j == (padded[i].len() - 2) { //Border cells
@@ -86,6 +87,8 @@ fn erode_4(point_cloud: &Vec<Vec<bool>>) -> Vec<Vec<bool>> {
 
                 if ( ((padded[i+1][j] == true) as i32) + ((padded[i-1][j] == true) as i32) 
                     + ((padded[i][j+1] == true) as i32) + ((padded[i][j-1] == true) as i32) 
+                    + ((padded[i+1][j+1] == true) as i32) + ((padded[i-1][j-1] == true) as i32) 
+                    + ((padded[i-1][j+1] == true) as i32) + ((padded[i+1][j-1] == true) as i32) 
                     ) >= min_neighbours  {
                         eroded[i-1][j-1] = true;
                 }
@@ -151,12 +154,18 @@ fn erode_neighborhood(point_cloud: &Vec<Vec<bool>>, padding: usize) -> Vec<Vec<b
                 
                 
                 if !has_neighbour {
+                    for x in 0..neighbours_per_level.len() {
+                        neighbours_per_level[x] = 0;
+                    }
+
                     for l in j-padding..j {
-                        if padded[i][l] == true  {
-                            neighbours_per_level[l-(j-padding)] += 1;
-                        }
-                        if padded[i][j+padding-(j-l)] == true  {
-                            neighbours_per_level[l-(j-padding)] += 1;
+                        for k in i-padding..i+padding+1 {
+                            if padded[k][l] == true  {
+                                neighbours_per_level[l-(j-padding)] += 1;
+                            }
+                            if padded[k][j+padding-(j-l)] == true  {
+                                neighbours_per_level[l-(j-padding)] += 1;
+                            }
                         }
                     }
                     
@@ -210,39 +219,27 @@ pub fn dilate(filtered: &Vec<Vec<bool>>) -> Vec<Vec<bool>> {
     
     for i in 1..padded.len() - 1{
         for j in 1..padded[i].len() - 1 {
-            let mut has_neighbour = false;
-            let min_neighbours = 
-                if i == 1 || j == 1 || i == (padded.len() - 2) || j == (padded[i].len() - 2) { //Border cells
-                    1
-                }
-                else {
-                    2
-                };
-
-            for k in j-1..j+2 {
-                if ((padded[i-1][k] == true ) as i32 
-                    + (padded[i+1][k] == true ) as i32 
-                ) >= min_neighbours {
-                    has_neighbour = true;
-                    break;
-                }
+            if padded[i][j] == true {
+                dilated[i-1][j-1] = true;
+                continue;
             }
             
-            if !has_neighbour {
-                if ((padded[i][j-1] == true ) as i32 
-                    + (padded[i][j+1] == true ) as i32 
-                ) >= min_neighbours {
-                    has_neighbour = true;
-                }
-            }  
+            let mut fill_gap = false;
+            if padded[i-1][j] == true && padded[i+1][j] == true {
+                fill_gap = true;
+            }
+            else if padded[i][j-1] == true && padded[i][j+1] == true {
+                fill_gap = true;
+            }
+            else if padded[i-1][j-1] == true && padded[i+1][j+1] == true {
+                fill_gap = true;
+            }
+            else if padded[i-1][j+1] == true && padded[i+1][j-1] == true {
+                fill_gap = true;
+            }
 
-            match has_neighbour {
-                true => {
-                    dilated[i-1][j-1] = true;
-                },
-                false => {
-                    dilated[i-1][j-1] = false;
-                }
+            if fill_gap {
+                dilated[i-1][j-1] = true;
             }
         }
     }

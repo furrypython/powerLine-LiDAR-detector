@@ -18,17 +18,56 @@ pub fn read_las(input: &String) -> (Reader, raw::Header)  {
 //-----------------------------------------------------------------------------------------
 //---------------------------------------WRITING-------------------------------------------
 
-//Writes into file all point cloud
-pub fn write_las(point_cloud: &Vec<Vec<Vec<las::Point>>>, raw_header: raw::Header, output: &String) {
+pub fn write_las_flat(points: &Vec<las::Point>, raw_header: raw::Header, output: &String, original_bounds: las::Bounds) {
     let mut writer = Writer::from_path(output, las::Header::from_raw(raw_header).unwrap()).unwrap();
+    let format = *writer.header().point_format();
+
+    for point in points {
+        // Filter points outside original bounds
+        if point.x < original_bounds.min.x || point.x > original_bounds.max.x ||
+           point.y < original_bounds.min.y || point.y > original_bounds.max.y {
+            continue;
+        }
+
+        let mut point = point.clone();
+        if point.return_number > 5 {
+            point.return_number = 5;
+        }
+        if format.has_gps_time && point.gps_time.is_none() {
+            point.gps_time = Some(0.0);
+        }
+        if format.has_nir && point.nir.is_none() {
+            point.nir = Some(0);
+        }
+        if point.classification != Classification::Ground {
+            writer.write(point.clone()).unwrap();
+        }
+    }
+    writer.close().unwrap();
+}
+pub fn write_las(point_cloud: &Vec<Vec<Vec<las::Point>>>, raw_header: raw::Header, output: &String, original_bounds: las::Bounds) {
+    let mut writer = Writer::from_path(output, las::Header::from_raw(raw_header).unwrap()).unwrap();
+    let format = *writer.header().point_format();
 
     for i in 0..point_cloud.len(){
         for j in 0..point_cloud[i].len(){
             if point_cloud[i][j].len() > 0{
                 for point in &point_cloud[i][j]{
+                    // Filter points outside original bounds
+                    if point.x < original_bounds.min.x || point.x > original_bounds.max.x ||
+                       point.y < original_bounds.min.y || point.y > original_bounds.max.y {
+                        continue;
+                    }
+
                     let mut point = point.clone();
                     if point.return_number > 5 {
                         point.return_number = 5;
+                    }
+                    if format.has_gps_time && point.gps_time.is_none() {
+                        point.gps_time = Some(0.0);
+                    }
+                    if format.has_nir && point.nir.is_none() {
+                        point.nir = Some(0);
                     }
                     if point.classification != Classification::Ground {
                         writer.write(point.clone()).unwrap();

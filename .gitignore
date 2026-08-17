@@ -3,3 +3,8 @@
 lidar-processing/target
 confusion-matrix/target
 .DS_Store
+
+# Python Cache and Compiled files
+__pycache__/
+*.py[cod]
+*.so
