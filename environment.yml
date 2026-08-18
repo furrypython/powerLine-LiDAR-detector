@@ -1,7 +1,13 @@
 name: pl_detector
 channels:
+  - conda-forge
   - defaults
 dependencies:
   - python-pdal
   - pdal
+  - numpy
+  - scipy
+  - scikit-learn
+  - laspy
+  - laszip
 prefix: /opt/miniconda3/envs/pl_detector
