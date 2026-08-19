@@ -26,10 +26,38 @@ def voxel_downsample(points, voxel_size):
     downsampled_points /= counts[:, np.newaxis]
     return downsampled_points
 
-def extract_skeleton(points, voxel_size=1.0, max_edge_length=5.0):
+def compute_tangents(nodes, k=10):
+    """Computes the local tangent direction for each node using PCA."""
+    tree = cKDTree(nodes)
+    tangents = np.zeros_like(nodes)
+    
+    # Find k nearest neighbors for PCA
+    distances, indices = tree.query(nodes, k=min(k, len(nodes)))
+    
+    for i, neighbors in enumerate(indices):
+        pts = nodes[neighbors]
+        if len(pts) < 3:
+            tangents[i] = np.array([1.0, 0.0, 0.0]) # Fallback
+            continue
+            
+        # Center the points
+        pts_centered = pts - np.mean(pts, axis=0)
+        
+        # Covariance matrix
+        cov = np.cov(pts_centered, rowvar=False)
+        
+        # Eigen decomposition
+        evals, evecs = np.linalg.eigh(cov)
+        
+        # The eigenvector corresponding to the largest eigenvalue is the tangent
+        tangents[i] = evecs[:, np.argmax(evals)]
+        
+    return tangents
+
+def extract_skeleton(points, voxel_size=1.0, max_edge_length=5.0, alpha=15.0):
     """
-    Extracts a 3D skeleton from a cluster of points using a Minimum Spanning Tree.
-    This preserves parallel wires and droppers.
+    Extracts a 3D skeleton from a cluster of points using a Directional Minimum Spanning Tree.
+    This penalizes perpendicular connections to preserve parallel wires.
     """
     if len(points) < 2:
         return points, []
@@ -39,7 +67,10 @@ def extract_skeleton(points, voxel_size=1.0, max_edge_length=5.0):
     if len(nodes) < 2:
         return nodes, []
 
-    # 2. Build nearest neighbor graph
+    # 2. Compute local tangents for directional awareness
+    tangents = compute_tangents(nodes, k=min(10, len(nodes)))
+
+    # 3. Build nearest neighbor graph
     tree = cKDTree(nodes)
     pairs = tree.query_pairs(r=max_edge_length)
     
@@ -51,23 +82,52 @@ def extract_skeleton(points, voxel_size=1.0, max_edge_length=5.0):
     col = []
     data = []
     for i, j in pairs:
-        dist = np.linalg.norm(nodes[i] - nodes[j])
+        v = nodes[j] - nodes[i]
+        dist = np.linalg.norm(v)
+        
+        if dist == 0:
+            continue
+            
+        v_norm = v / dist
+        
+        # Calculate alignment with local tangents (dot product)
+        dot_i = abs(np.dot(v_norm, tangents[i]))
+        dot_j = abs(np.dot(v_norm, tangents[j]))
+        
+        # Average alignment (1.0 = perfectly parallel, 0.0 = perfectly perpendicular)
+        alignment = (dot_i + dot_j) / 2.0
+        
+        # Apply penalty for perpendicular connections
+        penalty = alpha * (1.0 - alignment)
+        weight = dist * (1.0 + penalty)
+        
         row.append(i)
         col.append(j)
-        data.append(dist)
+        data.append(weight)
         # Undirected graph
         row.append(j)
         col.append(i)
-        data.append(dist)
+        data.append(weight)
+        
+    if not data:
+        return nodes, []
         
     graph = csr_matrix((data, (row, col)), shape=(len(nodes), len(nodes)))
     
-    # 3. Compute Minimum Spanning Tree
+    # 4. Compute Minimum Spanning Tree
     mst = minimum_spanning_tree(graph)
     
-    # Extract edges from MST
+    # 5. Extract edges and prune bad connections
     mst_coo = mst.tocoo()
-    edges = np.vstack((mst_coo.row, mst_coo.col)).T
+    edges = []
+    
+    for i, j, w in zip(mst_coo.row, mst_coo.col, mst_coo.data):
+        dist = np.linalg.norm(nodes[j] - nodes[i])
+        # If the weight is significantly higher than the distance, it means 
+        # it was heavily penalized (i.e., a sideways jump). We prune these.
+        if w > dist * 3.0: 
+            continue
+        edges.append([i, j])
     
     return nodes, edges
 
@@ -111,7 +171,7 @@ def main():
     parser = argparse.ArgumentParser(description="Convert filtered LiDAR wires to PLY polylines.")
     parser.add_argument("input_las", help="Path to the filtered .las/.laz file")
     parser.add_argument("output_dir", help="Directory to save the resulting .ply files")
-    parser.add_argument("--eps", type=float, default=2.0, help="DBSCAN clustering distance (meters)")
+    parser.add_argument("--eps", type=float, default=0.8, help="DBSCAN clustering distance (meters)")
     parser.add_argument("--min_samples", type=int, default=10, help="DBSCAN min points per cluster")
     parser.add_argument("--bin_size", type=float, default=1.0, help="Step size for polyline vertices (meters)")
     
@@ -158,8 +218,8 @@ def main():
         wire_points = points[labels == wire_id]
         
         # Extract skeleton preserving topology (parallel lines and droppers)
-        # Use DBSCAN eps * 2 as a safe max_edge_length to connect components
-        vertices, wire_edges = extract_skeleton(wire_points, voxel_size=args.bin_size, max_edge_length=args.eps * 2)
+        # Use a larger max_edge_length to bridge gaps, but rely on directional penalty to avoid cross-connections
+        vertices, wire_edges = extract_skeleton(wire_points, voxel_size=args.bin_size, max_edge_length=max(args.eps * 3, 4.0))
         
         if len(vertices) < 2 or len(wire_edges) == 0:
             continue # Skip noise clusters too small to form a line

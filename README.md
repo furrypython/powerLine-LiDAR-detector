@@ -88,7 +88,7 @@ python vectorize_wires.py <input.las> <output_directory>
 ```
 
 **Parameters (Optional):**
-- `--eps`: Distance for clustering wires (default: `2.0` meters)
+- `--eps`: Distance for clustering wires (default: `0.8` meters). Lower this value (e.g., `0.5`) if parallel wires are being incorrectly merged.
 - `--min_samples`: Minimum points needed to form a wire (default: `10`)
 - `--bin_size`: Spacing between the generated line vertices (default: `1.0` meters)
 
