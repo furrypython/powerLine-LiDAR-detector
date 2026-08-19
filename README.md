@@ -81,20 +81,21 @@ python src/ground_seg.py -g <input>
 
 ### 3️⃣ Vectorization (Convert Points to Polylines)
 
-After extracting the power line points with the Rust module, you can optionally vectorize the point cloud into explicit 3D lines (`.ply` format). This will cluster separate wires and create continuous polylines.
+After extracting the power line points with the Rust module, you can vectorize the point cloud into explicit 3D lines (`.ply` format). This tool uses **Anisotropic Directional Graph Clustering** to separate closely running parallel wires accurately without bridging them horizontally, and then generates clean continuous polylines using a directional Minimum Spanning Tree.
 
 ```bash
 python vectorize_wires.py <input.las> <output_directory>
 ```
 
 **Parameters (Optional):**
-- `--eps`: Distance for clustering wires (default: `0.8` meters). Lower this value (e.g., `0.5`) if parallel wires are being incorrectly merged.
-- `--min_samples`: Minimum points needed to form a wire (default: `10`)
-- `--bin_size`: Spacing between the generated line vertices (default: `1.0` meters)
+- `--max_dist`: Maximum distance to connect points during clustering (default: `2.0` meters).
+- `--alignment`: Directional alignment threshold for parallel lines (default: `0.85`). Valid range is 0.0 to 1.0; a higher value is stricter and demands more perfectly parallel connections, avoiding sideways jumps between distinct wires.
+- `--min_samples`: Minimum points needed to form a wire cluster (default: `10`).
+- `--bin_size`: Spacing between the generated line vertices (default: `1.0` meters).
 
 Example:
 ```bash
-python vectorize_wires.py outputs/filtered.las outputs/vectorized/ --eps 1.5 --bin_size 0.5
+python vectorize_wires.py outputs/filtered.las outputs/vectorized/ --max_dist 2.0 --alignment 0.85 --bin_size 0.5
 ```
 
 ### 4️⃣ Metrics calculation

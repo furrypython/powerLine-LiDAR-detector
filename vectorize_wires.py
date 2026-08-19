@@ -6,7 +6,7 @@ from sklearn.cluster import DBSCAN
 import random
 from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import minimum_spanning_tree
+from scipy.sparse.csgraph import minimum_spanning_tree, connected_components
 
 def generate_random_color():
     """Generates a random RGB color."""
@@ -53,6 +53,60 @@ def compute_tangents(nodes, k=10):
         tangents[i] = evecs[:, np.argmax(evals)]
         
     return tangents
+
+def extract_wires_anisotropic(points, voxel_size=0.5, max_dist=2.0, alignment_threshold=0.85):
+    """
+    Extracts individual wires by building a graph that only permits 
+    connections along the local tangent direction. Replaces DBSCAN.
+    """
+    if len(points) < 2:
+        return np.zeros(len(points), dtype=int), 0
+        
+    # 1. Downsample points to create graph nodes
+    # Use a finer voxel size (0.2-0.5m) to ensure parallel wires aren't merged into a single voxel
+    nodes = voxel_downsample(points, voxel_size)
+    if len(nodes) < 2:
+        return np.zeros(len(points), dtype=int), 0
+
+    # 2. Compute local tangents using your existing PCA function
+    tangents = compute_tangents(nodes, k=15)
+
+    # 3. Build a spatial graph based on distance
+    tree = cKDTree(nodes)
+    pairs = tree.query_pairs(r=max_dist)
+    
+    row, col, data = [], [], []
+    
+    # 4. Filter edges using Anisotropic (Directional) logic
+    for i, j in pairs:
+        v = nodes[j] - nodes[i]
+        dist = np.linalg.norm(v)
+        if dist == 0: continue
+            
+        v_norm = v / dist
+        
+        # How well does the connection align with the wire direction?
+        align_i = abs(np.dot(v_norm, tangents[i]))
+        align_j = abs(np.dot(v_norm, tangents[j]))
+        
+        # PRUNE: If connection jumps sideways, alignment is low
+        if align_i > alignment_threshold and align_j > alignment_threshold:
+            row.extend([i, j])
+            col.extend([j, i])
+            data.extend([dist, dist])
+            
+    if not data:
+        return np.zeros(len(points), dtype=int), 0
+
+    # 5. Extract the individual wires using Connected Components
+    graph = csr_matrix((data, (row, col)), shape=(len(nodes), len(nodes)))
+    num_components, node_labels = connected_components(csgraph=graph, directed=False)
+    
+    # 6. Map raw points back to their nearest node's cluster label
+    _, closest_node_idx = tree.query(points)
+    point_labels = node_labels[closest_node_idx]
+    
+    return point_labels, num_components
 
 def extract_skeleton(points, voxel_size=1.0, max_edge_length=5.0, alpha=15.0):
     """
@@ -168,11 +222,12 @@ def write_ply(filepath, vertices, edges, colors=None):
             f.write(f"{e[0]} {e[1]}\n")
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert filtered LiDAR wires to PLY polylines.")
+    parser = argparse.ArgumentParser(description="Convert filtered LiDAR wires to PLY polylines using Anisotropic Graph Separation.")
     parser.add_argument("input_las", help="Path to the filtered .las/.laz file")
     parser.add_argument("output_dir", help="Directory to save the resulting .ply files")
-    parser.add_argument("--eps", type=float, default=0.8, help="DBSCAN clustering distance (meters)")
-    parser.add_argument("--min_samples", type=int, default=10, help="DBSCAN min points per cluster")
+    parser.add_argument("--max_dist", type=float, default=2.0, help="Max distance to connect points during clustering (meters)")
+    parser.add_argument("--alignment", type=float, default=0.85, help="Directional alignment threshold (0.0 to 1.0, higher is stricter/more parallel)")
+    parser.add_argument("--min_samples", type=int, default=10, help="Min points per wire cluster")
     parser.add_argument("--bin_size", type=float, default=1.0, help="Step size for polyline vertices (meters)")
     
     args = parser.parse_args()
@@ -197,33 +252,47 @@ def main():
         print("No points found in the input file.")
         return
 
-    # 2. Cluster Points using DBSCAN
-    print(f"Clustering {len(points)} points using DBSCAN (eps={args.eps}m)...")
-    clustering = DBSCAN(eps=args.eps, min_samples=args.min_samples).fit(points)
-    labels = clustering.labels_
+    # 2. Cluster Points using Anisotropic Directional Graph
+    print(f"Clustering {len(points)} points directionally...")
+    
+    # We use a finer voxel size (0.5m) specifically for the separation graph 
+    # to ensure parallel lines don't get merged into a single voxel before we even start.
+    graph_voxel_size = min(args.bin_size, 0.5)
+    
+    labels, num_components = extract_wires_anisotropic(
+        points, 
+        voxel_size=graph_voxel_size, 
+        max_dist=args.max_dist, 
+        alignment_threshold=args.alignment
+    )
     
     unique_labels = set(labels)
-    unique_labels.discard(-1) # Remove noise label (-1)
-    
-    print(f"Found {len(unique_labels)} wires.")
+    print(f"Found {len(unique_labels)} potential wires.")
     
     consolidated_vertices = []
     consolidated_edges = []
     consolidated_colors = []
     
     current_vertex_offset = 0
+    valid_wires_count = 0
     
-    # 3. Process each cluster/wire
+    # 3. Process each isolated cluster/wire
     for wire_id in unique_labels:
         wire_points = points[labels == wire_id]
         
-        # Extract skeleton preserving topology (parallel lines and droppers)
-        # Use a larger max_edge_length to bridge gaps, but rely on directional penalty to avoid cross-connections
-        vertices, wire_edges = extract_skeleton(wire_points, voxel_size=args.bin_size, max_edge_length=max(args.eps * 3, 4.0))
+        # Skip noise / tiny clusters
+        if len(wire_points) < args.min_samples:
+            continue
+            
+        # Now we use the original logic on the ALREADY SEPARATED wire points.
+        # Because this cluster ONLY contains points from one line, the MST 
+        # cannot jump to a neighbor (the neighbor points are in a different cluster).
+        vertices, wire_edges = extract_skeleton(wire_points, voxel_size=args.bin_size, max_edge_length=max(args.max_dist, 4.0))
         
         if len(vertices) < 2 or len(wire_edges) == 0:
-            continue # Skip noise clusters too small to form a line
+            continue # Skip if it fails to form a line
             
+        valid_wires_count += 1
         wire_color = generate_random_color()
         
         # Write individual wire to its own PLY file
@@ -241,6 +310,7 @@ def main():
         current_vertex_offset += len(vertices)
         
     # 4. Save consolidated multi-colored file
+    print(f"Successfully processed {valid_wires_count} wires.")
     print(f"Saving consolidated file...")
     cons_filepath = os.path.join(output_dir, "consolidated_colored_wires.ply")
     write_ply(cons_filepath, consolidated_vertices, consolidated_edges, consolidated_colors)
