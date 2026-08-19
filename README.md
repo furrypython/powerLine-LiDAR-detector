@@ -88,14 +88,13 @@ python vectorize_wires.py <input.las> <output_directory>
 ```
 
 **Parameters (Optional):**
-- `--max_dist`: Maximum distance to connect points during clustering (default: `2.0` meters).
-- `--max_perp_dist`: Maximum perpendicular distance to the local tangent. If a connection jumps sideways more than this threshold (e.g., `0.4` meters), it is rejected. This strictly prevents jumping to parallel wires.
-- `--min_samples`: Minimum points needed to form a wire cluster (default: `10`).
-- `--bin_size`: Spacing between the generated line vertices (default: `1.0` meters).
+- `--voxel_size`: Voxel resolution for downsampling. Keep small (`0.1`-`0.2`) to properly separate closely spaced parallel wires. (default: `0.2` meters).
+- `--max_dist`: Maximum distance to connect points during clustering (default: `1.0` meters).
+- `--alignment`: Directional alignment threshold for horizontal wires (default: `0.85`).
 
 Example:
 ```bash
-python vectorize_wires.py outputs/filtered.las outputs/vectorized/ --max_dist 2.0 --max_perp_dist 0.4 --bin_size 0.5
+python vectorize_wires.py outputs/filtered.las outputs/vectorized/ --voxel_size 0.2 --max_dist 1.0 --alignment 0.85
 ```
 
 ### 4️⃣ Metrics calculation
