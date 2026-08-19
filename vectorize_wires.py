@@ -2,11 +2,10 @@ import os
 import argparse
 import numpy as np
 import laspy
-from sklearn.cluster import DBSCAN
 import random
 from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import minimum_spanning_tree, connected_components
+from scipy.sparse.csgraph import minimum_spanning_tree, connected_components, dijkstra
 
 def generate_random_color():
     """Generates a random RGB color."""
@@ -26,16 +25,17 @@ def voxel_downsample(points, voxel_size):
     downsampled_points /= counts[:, np.newaxis]
     return downsampled_points
 
-def compute_tangents(nodes, k=10):
+def compute_tangents(nodes, k=15):
     """Computes the local tangent direction for each node using PCA."""
     tree = cKDTree(nodes)
     tangents = np.zeros_like(nodes)
     
-    # Find k nearest neighbors for PCA
-    distances, indices = tree.query(nodes, k=min(k, len(nodes)))
+    # Restrict distance so PCA doesn't pull points from across large gaps
+    distances, indices = tree.query(nodes, k=k, distance_upper_bound=2.0)
     
     for i, neighbors in enumerate(indices):
-        pts = nodes[neighbors]
+        valid_neighbors = neighbors[distances[i] != np.inf]
+        pts = nodes[valid_neighbors]
         if len(pts) < 3:
             tangents[i] = np.array([1.0, 0.0, 0.0]) # Fallback
             continue
@@ -54,21 +54,21 @@ def compute_tangents(nodes, k=10):
         
     return tangents
 
-def extract_wires_anisotropic(points, voxel_size=0.5, max_dist=2.0, alignment_threshold=0.85):
+def extract_wires_anisotropic(points, voxel_size=0.5, max_dist=2.0, max_perp_dist=0.4):
     """
     Extracts individual wires by building a graph that only permits 
-    connections along the local tangent direction. Replaces DBSCAN.
+    connections where the perpendicular distance to the local tangent is small.
+    This physically prevents jumping sideways to parallel wires.
     """
     if len(points) < 2:
         return np.zeros(len(points), dtype=int), 0
         
     # 1. Downsample points to create graph nodes
-    # Use a finer voxel size (0.2-0.5m) to ensure parallel wires aren't merged into a single voxel
     nodes = voxel_downsample(points, voxel_size)
     if len(nodes) < 2:
         return np.zeros(len(points), dtype=int), 0
 
-    # 2. Compute local tangents using your existing PCA function
+    # 2. Compute local tangents 
     tangents = compute_tangents(nodes, k=15)
 
     # 3. Build a spatial graph based on distance
@@ -77,20 +77,23 @@ def extract_wires_anisotropic(points, voxel_size=0.5, max_dist=2.0, alignment_th
     
     row, col, data = [], [], []
     
-    # 4. Filter edges using Anisotropic (Directional) logic
+    # 4. Filter edges using Perpendicular Distance logic
     for i, j in pairs:
         v = nodes[j] - nodes[i]
         dist = np.linalg.norm(v)
         if dist == 0: continue
             
-        v_norm = v / dist
+        # Find perpendicular distance from i's tangent to j
+        proj_i = np.dot(v, tangents[i]) * tangents[i]
+        perp_i = np.linalg.norm(v - proj_i)
         
-        # How well does the connection align with the wire direction?
-        align_i = abs(np.dot(v_norm, tangents[i]))
-        align_j = abs(np.dot(v_norm, tangents[j]))
+        # Find perpendicular distance from j's tangent to i
+        proj_j = np.dot(v, tangents[j]) * tangents[j]
+        perp_j = np.linalg.norm(v - proj_j)
         
-        # PRUNE: If connection jumps sideways, alignment is low
-        if align_i > alignment_threshold and align_j > alignment_threshold:
+        # STRICT PRUNE: If the connection jumps sideways by more than the wire's 
+        # physical radius (e.g. 0.4m), it is jumping to a parallel wire! Drop it.
+        if perp_i <= max_perp_dist and perp_j <= max_perp_dist:
             row.extend([i, j])
             col.extend([j, i])
             data.extend([dist, dist])
@@ -108,82 +111,103 @@ def extract_wires_anisotropic(points, voxel_size=0.5, max_dist=2.0, alignment_th
     
     return point_labels, num_components
 
-def extract_skeleton(points, voxel_size=1.0, max_edge_length=5.0, alpha=15.0):
+def extract_longest_path(mst_graph):
+    """Finds the longest path (diameter) in a Minimum Spanning Tree to remove branches."""
+    mst_undirected = mst_graph + mst_graph.T
+    n_components, labels = connected_components(mst_undirected, directed=False)
+    
+    # Find the largest connected component to start Dijkstra
+    unique, counts = np.unique(labels, return_counts=True)
+    largest_comp_label = unique[np.argmax(counts)]
+    start_node = np.where(labels == largest_comp_label)[0][0]
+    
+    # Run BFS/Dijkstra to find the furthest node from start_node (End 1)
+    dist1, pred1 = dijkstra(mst_undirected, directed=False, indices=start_node, return_predecessors=True)
+    dist1[dist1 == np.inf] = -1
+    end1 = np.argmax(dist1)
+    
+    # Run BFS/Dijkstra from End 1 to find the other furthest node (End 2)
+    dist2, pred2 = dijkstra(mst_undirected, directed=False, indices=end1, return_predecessors=True)
+    dist2[dist2 == np.inf] = -1
+    end2 = np.argmax(dist2)
+    
+    # Backtrack from End 2 to End 1 to get the pure, unbranched path
+    path = []
+    curr = end2
+    while curr != -9999 and curr != end1:
+        path.append(curr)
+        curr = pred2[curr]
+    if curr == end1:
+        path.append(end1)
+        
+    return path[::-1]
+
+def smooth_polyline(points, window_size=5):
+    """Applies a moving average to smooth a polyline's vertices."""
+    if len(points) < window_size:
+        return points
+    
+    smoothed = np.zeros_like(points)
+    
+    # Pad the ends so the wire doesn't shrink
+    pad_front = np.repeat(points[0:1], window_size//2, axis=0)
+    pad_back = np.repeat(points[-1:], window_size//2, axis=0)
+    padded = np.vstack((pad_front, points, pad_back))
+    
+    for i in range(3): # Smooth X, Y, Z independently
+        smoothed[:, i] = np.convolve(padded[:, i], np.ones(window_size)/window_size, mode='valid')
+        
+    return smoothed
+
+def extract_skeleton(points, bin_size=1.0, max_dist=2.0):
     """
-    Extracts a 3D skeleton from a cluster of points using a Directional Minimum Spanning Tree.
-    This penalizes perpendicular connections to preserve parallel wires.
+    Extracts a perfectly smooth, unbranched 3D polyline from an isolated wire cluster.
     """
     if len(points) < 2:
         return points, []
 
     # 1. Downsample points to create graph nodes
-    nodes = voxel_downsample(points, voxel_size)
+    nodes = voxel_downsample(points, bin_size)
     if len(nodes) < 2:
         return nodes, []
 
-    # 2. Compute local tangents for directional awareness
-    tangents = compute_tangents(nodes, k=min(10, len(nodes)))
-
-    # 3. Build nearest neighbor graph
+    # 2. Build nearest neighbor graph (generous radius to jump small gaps)
     tree = cKDTree(nodes)
-    pairs = tree.query_pairs(r=max_edge_length)
+    pairs = tree.query_pairs(r=max_dist + 2.0)
     
     if not pairs:
         return nodes, []
 
     # Build sparse matrix for graph
-    row = []
-    col = []
-    data = []
+    row, col, data = [], [], []
     for i, j in pairs:
-        v = nodes[j] - nodes[i]
-        dist = np.linalg.norm(v)
-        
-        if dist == 0:
-            continue
-            
-        v_norm = v / dist
-        
-        # Calculate alignment with local tangents (dot product)
-        dot_i = abs(np.dot(v_norm, tangents[i]))
-        dot_j = abs(np.dot(v_norm, tangents[j]))
-        
-        # Average alignment (1.0 = perfectly parallel, 0.0 = perfectly perpendicular)
-        alignment = (dot_i + dot_j) / 2.0
-        
-        # Apply penalty for perpendicular connections
-        penalty = alpha * (1.0 - alignment)
-        weight = dist * (1.0 + penalty)
-        
-        row.append(i)
-        col.append(j)
-        data.append(weight)
-        # Undirected graph
-        row.append(j)
-        col.append(i)
-        data.append(weight)
-        
-    if not data:
-        return nodes, []
+        dist = np.linalg.norm(nodes[i] - nodes[j])
+        row.append(i); col.append(j); data.append(dist)
         
     graph = csr_matrix((data, (row, col)), shape=(len(nodes), len(nodes)))
     
-    # 4. Compute Minimum Spanning Tree
+    # 3. Compute Euclidean Minimum Spanning Tree
     mst = minimum_spanning_tree(graph)
     
-    # 5. Extract edges and prune bad connections
-    mst_coo = mst.tocoo()
-    edges = []
+    if mst.nnz == 0:
+        return nodes, []
     
-    for i, j, w in zip(mst_coo.row, mst_coo.col, mst_coo.data):
-        dist = np.linalg.norm(nodes[j] - nodes[i])
-        # If the weight is significantly higher than the distance, it means 
-        # it was heavily penalized (i.e., a sideways jump). We prune these.
-        if w > dist * 3.0: 
-            continue
-        edges.append([i, j])
+    # 4. Extract the Longest Path to remove all MST branches/spikes
+    path_indices = extract_longest_path(mst)
     
-    return nodes, edges
+    if len(path_indices) < 2:
+        return nodes, []
+        
+    ordered_nodes = nodes[path_indices]
+    
+    # 5. Apply Moving Average Smoothing to remove voxel zigzag artifacts
+    window = max(3, int(5.0 / bin_size)) # E.g., 5-node window for 1.0m bins (5m smoothing)
+    smoothed_nodes = smooth_polyline(ordered_nodes, window_size=window)
+    
+    # 6. Create linear edges [0, 1], [1, 2], ...
+    edges = [[i, i+1] for i in range(len(smoothed_nodes)-1)]
+    
+    return smoothed_nodes, edges
 
 def write_ply(filepath, vertices, edges, colors=None):
     """Writes vertices and edges to an ASCII .ply file."""
@@ -226,7 +250,7 @@ def main():
     parser.add_argument("input_las", help="Path to the filtered .las/.laz file")
     parser.add_argument("output_dir", help="Directory to save the resulting .ply files")
     parser.add_argument("--max_dist", type=float, default=2.0, help="Max distance to connect points during clustering (meters)")
-    parser.add_argument("--alignment", type=float, default=0.85, help="Directional alignment threshold (0.0 to 1.0, higher is stricter/more parallel)")
+    parser.add_argument("--max_perp_dist", type=float, default=0.4, help="Max perpendicular distance to local tangent to connect points. Solves parallel bridging. (meters)")
     parser.add_argument("--min_samples", type=int, default=10, help="Min points per wire cluster")
     parser.add_argument("--bin_size", type=float, default=1.0, help="Step size for polyline vertices (meters)")
     
@@ -255,15 +279,13 @@ def main():
     # 2. Cluster Points using Anisotropic Directional Graph
     print(f"Clustering {len(points)} points directionally...")
     
-    # We use a finer voxel size (0.5m) specifically for the separation graph 
-    # to ensure parallel lines don't get merged into a single voxel before we even start.
     graph_voxel_size = min(args.bin_size, 0.5)
     
     labels, num_components = extract_wires_anisotropic(
         points, 
         voxel_size=graph_voxel_size, 
         max_dist=args.max_dist, 
-        alignment_threshold=args.alignment
+        max_perp_dist=args.max_perp_dist
     )
     
     unique_labels = set(labels)
@@ -280,26 +302,21 @@ def main():
     for wire_id in unique_labels:
         wire_points = points[labels == wire_id]
         
-        # Skip noise / tiny clusters
         if len(wire_points) < args.min_samples:
             continue
             
-        # Now we use the original logic on the ALREADY SEPARATED wire points.
-        # Because this cluster ONLY contains points from one line, the MST 
-        # cannot jump to a neighbor (the neighbor points are in a different cluster).
-        vertices, wire_edges = extract_skeleton(wire_points, voxel_size=args.bin_size, max_edge_length=max(args.max_dist, 4.0))
+        # Extract skeleton finding the longest, unbranched path and smoothing it
+        vertices, wire_edges = extract_skeleton(wire_points, bin_size=args.bin_size, max_dist=args.max_dist)
         
         if len(vertices) < 2 or len(wire_edges) == 0:
-            continue # Skip if it fails to form a line
+            continue
             
         valid_wires_count += 1
         wire_color = generate_random_color()
         
-        # Write individual wire to its own PLY file
         ind_filepath = os.path.join(individual_dir, f"wire_{wire_id}.ply")
         write_ply(ind_filepath, vertices, wire_edges)
         
-        # Append to consolidated data
         for v in vertices:
             consolidated_vertices.append(v)
             consolidated_colors.append(wire_color)
