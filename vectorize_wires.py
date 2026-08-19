@@ -2,11 +2,10 @@ import os
 import argparse
 import numpy as np
 import laspy
-from sklearn.cluster import DBSCAN
 import random
 from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import minimum_spanning_tree
+from scipy.sparse.csgraph import minimum_spanning_tree, connected_components
 
 def generate_random_color():
     """Generates a random RGB color."""
@@ -26,120 +25,199 @@ def voxel_downsample(points, voxel_size):
     downsampled_points /= counts[:, np.newaxis]
     return downsampled_points
 
-def compute_tangents(nodes, k=10):
+def compute_tangents(nodes, k=15, radius=0.6):
     """Computes the local tangent direction for each node using PCA."""
     tree = cKDTree(nodes)
     tangents = np.zeros_like(nodes)
     
-    # Find k nearest neighbors for PCA
-    distances, indices = tree.query(nodes, k=min(k, len(nodes)))
+    distances, indices = tree.query(nodes, k=k, distance_upper_bound=radius)
     
     for i, neighbors in enumerate(indices):
-        pts = nodes[neighbors]
+        valid_neighbors = neighbors[distances[i] != np.inf]
+        pts = nodes[valid_neighbors]
         if len(pts) < 3:
             tangents[i] = np.array([1.0, 0.0, 0.0]) # Fallback
             continue
             
-        # Center the points
         pts_centered = pts - np.mean(pts, axis=0)
-        
-        # Covariance matrix
         cov = np.cov(pts_centered, rowvar=False)
-        
-        # Eigen decomposition
         evals, evecs = np.linalg.eigh(cov)
-        
-        # The eigenvector corresponding to the largest eigenvalue is the tangent
         tangents[i] = evecs[:, np.argmax(evals)]
         
     return tangents
 
-def extract_skeleton(points, voxel_size=1.0, max_edge_length=5.0, alpha=15.0):
+def prune_short_branches(nodes, edges, min_length=0.5):
+    """Removes short dangling branches (noise) while preserving long branches (droppers)."""
+    adj = {i: set() for i in range(len(nodes))}
+    for u, v in edges:
+        adj[u].add(v)
+        adj[v].add(u)
+        
+    edge_len = {}
+    for u, v in edges:
+        d = np.linalg.norm(nodes[u] - nodes[v])
+        edge_len[(u, v)] = d
+        edge_len[(v, u)] = d
+
+    while True:
+        leaves = [i for i, neighbors in adj.items() if len(neighbors) == 1]
+        removed_any = False
+        
+        for leaf in leaves:
+            if leaf not in adj or len(adj[leaf]) != 1:
+                continue
+                
+            curr = leaf
+            prev = None
+            branch_len = 0.0
+            branch_nodes = []
+            
+            while True:
+                branch_nodes.append(curr)
+                neighbors = list(adj[curr])
+                
+                if len(neighbors) > 2:
+                    break # Reached junction
+                if len(neighbors) == 1 and curr != leaf:
+                    break # Reached another leaf (isolated path)
+                    
+                next_node = neighbors[0] if neighbors[0] != prev else (neighbors[1] if len(neighbors) > 1 else None)
+                if next_node is None:
+                    break
+                    
+                branch_len += edge_len[(curr, next_node)]
+                prev = curr
+                curr = next_node
+                
+            if branch_len < min_length:
+                if len(list(adj[curr])) > 2:
+                    # Keep the junction node
+                    nodes_to_remove = branch_nodes[:-1]
+                else:
+                    # Remove the entire isolated short path
+                    nodes_to_remove = branch_nodes
+                    
+                for n in nodes_to_remove:
+                    if n in adj:
+                        for neighbor in list(adj[n]):
+                            adj[neighbor].remove(n)
+                        del adj[n]
+                removed_any = True
+                
+        if not removed_any:
+            break
+            
+    new_edges = []
+    for u, neighbors in adj.items():
+        for v in neighbors:
+            if u < v:
+                new_edges.append([u, v])
+                
+    return list(adj.keys()), new_edges
+
+def smooth_graph(nodes, edges, iterations=3):
+    """Applies Laplacian smoothing to the graph to remove zigzags."""
+    adj = {i: [] for i in range(len(nodes))}
+    for u, v in edges:
+        adj[u].append(v)
+        adj[v].append(u)
+        
+    smoothed = np.copy(nodes)
+    for _ in range(iterations):
+        new_nodes = np.copy(smoothed)
+        for i in range(len(nodes)):
+            if len(adj[i]) > 0:
+                avg_neighbor = np.mean(smoothed[adj[i]], axis=0)
+                new_nodes[i] = 0.5 * smoothed[i] + 0.5 * avg_neighbor
+        smoothed = new_nodes
+    return smoothed
+
+def extract_wire_network(points, voxel_size=0.2, max_dist=1.0, align_threshold=0.85, vertical_thresh=0.5):
     """
-    Extracts a 3D skeleton from a cluster of points using a Directional Minimum Spanning Tree.
-    This penalizes perpendicular connections to preserve parallel wires.
+    Builds a wire network graph that preserves droppers and parallel wires correctly.
     """
     if len(points) < 2:
-        return points, []
-
-    # 1. Downsample points to create graph nodes
+        return [], []
+        
+    # 1. Downsample
     nodes = voxel_downsample(points, voxel_size)
     if len(nodes) < 2:
-        return nodes, []
+        return [], []
 
-    # 2. Compute local tangents for directional awareness
-    tangents = compute_tangents(nodes, k=min(10, len(nodes)))
-
-    # 3. Build nearest neighbor graph
+    # 2. Tangents
+    tangents = compute_tangents(nodes, k=15, radius=0.6)
     tree = cKDTree(nodes)
-    pairs = tree.query_pairs(r=max_edge_length)
+    pairs = tree.query_pairs(r=max_dist)
     
-    if not pairs:
-        return nodes, []
-
-    # Build sparse matrix for graph
-    row = []
-    col = []
-    data = []
+    row, col, data = [], [], []
+    valid_vertical_edges = []
+    
+    # 3. Anisotropic & Vertical Filter
     for i, j in pairs:
         v = nodes[j] - nodes[i]
         dist = np.linalg.norm(v)
-        
-        if dist == 0:
-            continue
+        if dist == 0: continue
             
-        v_norm = v / dist
+        u = v / dist
         
-        # Calculate alignment with local tangents (dot product)
-        dot_i = abs(np.dot(v_norm, tangents[i]))
-        dot_j = abs(np.dot(v_norm, tangents[j]))
+        # Check if the connection is a Dropper (Vertical)
+        is_vertical = abs(u[2]) > vertical_thresh
         
-        # Average alignment (1.0 = perfectly parallel, 0.0 = perfectly perpendicular)
-        alignment = (dot_i + dot_j) / 2.0
+        # Check if the connection aligns with the horizontal wire path
+        align_i = abs(np.dot(u, tangents[i]))
+        align_j = abs(np.dot(u, tangents[j]))
+        is_aligned = align_i > align_threshold and align_j > align_threshold
         
-        # Apply penalty for perpendicular connections
-        penalty = alpha * (1.0 - alignment)
-        weight = dist * (1.0 + penalty)
-        
-        row.append(i)
-        col.append(j)
-        data.append(weight)
-        # Undirected graph
-        row.append(j)
-        col.append(i)
-        data.append(weight)
-        
+        if is_vertical or is_aligned:
+            row.extend([i, j])
+            col.extend([j, i])
+            data.extend([dist, dist])
+            
+            if is_vertical:
+                valid_vertical_edges.append((i, j, dist))
+                
     if not data:
-        return nodes, []
-        
+        return [], []
+
     graph = csr_matrix((data, (row, col)), shape=(len(nodes), len(nodes)))
     
-    # 4. Compute Minimum Spanning Tree
+    # 4. MST extracts the thin, zigzag-free backbone of the graph
     mst = minimum_spanning_tree(graph)
-    
-    # 5. Extract edges and prune bad connections
     mst_coo = mst.tocoo()
-    edges = []
     
-    for i, j, w in zip(mst_coo.row, mst_coo.col, mst_coo.data):
-        dist = np.linalg.norm(nodes[j] - nodes[i])
-        # If the weight is significantly higher than the distance, it means 
-        # it was heavily penalized (i.e., a sideways jump). We prune these.
-        if w > dist * 3.0: 
-            continue
-        edges.append([i, j])
+    final_edges = set()
+    for i, j in zip(mst_coo.row, mst_coo.col):
+        final_edges.add((min(i, j), max(i, j)))
+        
+    # 5. Restore droppers! (MST breaks cycles, so it deletes droppers. We add them back.)
+    for i, j, dist in valid_vertical_edges:
+        final_edges.add((min(i, j), max(i, j)))
+        
+    final_edges_list = [list(e) for e in final_edges]
     
-    return nodes, edges
+    # 6. Prune short noise branches (keeps long droppers and main wires)
+    valid_node_indices, pruned_edges = prune_short_branches(nodes, final_edges_list, min_length=0.5)
+    
+    if len(valid_node_indices) == 0:
+        return [], []
+        
+    # 7. Smooth the network
+    smoothed_nodes = smooth_graph(nodes, pruned_edges, iterations=3)
+    
+    # Re-index
+    index_map = {old_idx: new_idx for new_idx, old_idx in enumerate(valid_node_indices)}
+    final_nodes = smoothed_nodes[valid_node_indices]
+    final_edges_remapped = [[index_map[u], index_map[v]] for u, v in pruned_edges]
+    
+    return final_nodes, final_edges_remapped
 
 def write_ply(filepath, vertices, edges, colors=None):
     """Writes vertices and edges to an ASCII .ply file."""
     num_vertices = len(vertices)
     num_edges = len(edges)
-    
     has_colors = colors is not None
     
     with open(filepath, 'w') as f:
-        # Header
         f.write("ply\n")
         f.write("format ascii 1.0\n")
         f.write(f"element vertex {num_vertices}\n")
@@ -155,7 +233,6 @@ def write_ply(filepath, vertices, edges, colors=None):
         f.write("property int vertex2\n")
         f.write("end_header\n")
         
-        # Body - Vertices
         for i, v in enumerate(vertices):
             if has_colors:
                 c = colors[i]
@@ -163,24 +240,22 @@ def write_ply(filepath, vertices, edges, colors=None):
             else:
                 f.write(f"{v[0]:.4f} {v[1]:.4f} {v[2]:.4f}\n")
                 
-        # Body - Edges
         for e in edges:
             f.write(f"{e[0]} {e[1]}\n")
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert filtered LiDAR wires to PLY polylines.")
+    parser = argparse.ArgumentParser(description="Convert filtered LiDAR wires to PLY networks (preserving droppers).")
     parser.add_argument("input_las", help="Path to the filtered .las/.laz file")
     parser.add_argument("output_dir", help="Directory to save the resulting .ply files")
-    parser.add_argument("--eps", type=float, default=0.8, help="DBSCAN clustering distance (meters)")
-    parser.add_argument("--min_samples", type=int, default=10, help="DBSCAN min points per cluster")
-    parser.add_argument("--bin_size", type=float, default=1.0, help="Step size for polyline vertices (meters)")
+    parser.add_argument("--voxel_size", type=float, default=0.2, help="Voxel downsampling resolution. Keep small (0.1-0.2) to separate parallel wires.")
+    parser.add_argument("--max_dist", type=float, default=1.0, help="Max distance to connect points (meters)")
+    parser.add_argument("--alignment", type=float, default=0.85, help="Directional alignment threshold for horizontal wires (0.0-1.0)")
     
     args = parser.parse_args()
     
     input_las = args.input_las
     output_dir = args.output_dir
     
-    # Setup Output Directories
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         
@@ -188,7 +263,6 @@ def main():
     if not os.path.exists(individual_dir):
         os.makedirs(individual_dir)
 
-    # 1. Load LAS File
     print(f"Reading {input_las}...")
     las = laspy.read(input_las)
     points = np.vstack((las.x, las.y, las.z)).transpose()
@@ -197,50 +271,68 @@ def main():
         print("No points found in the input file.")
         return
 
-    # 2. Cluster Points using DBSCAN
-    print(f"Clustering {len(points)} points using DBSCAN (eps={args.eps}m)...")
-    clustering = DBSCAN(eps=args.eps, min_samples=args.min_samples).fit(points)
-    labels = clustering.labels_
+    print("Building anisotropic wire network (separating parallel wires and preserving droppers)...")
     
-    unique_labels = set(labels)
-    unique_labels.discard(-1) # Remove noise label (-1)
+    final_nodes, final_edges = extract_wire_network(
+        points, 
+        voxel_size=args.voxel_size, 
+        max_dist=args.max_dist, 
+        align_threshold=args.alignment
+    )
     
-    print(f"Found {len(unique_labels)} wires.")
+    if len(final_nodes) == 0:
+        print("Failed to extract any wires.")
+        return
+        
+    print("Separating network into distinct physical components...")
+    
+    row = [e[0] for e in final_edges] + [e[1] for e in final_edges]
+    col = [e[1] for e in final_edges] + [e[0] for e in final_edges]
+    data = np.ones(len(row))
+    graph_final = csr_matrix((data, (row, col)), shape=(len(final_nodes), len(final_nodes)))
+    num_comps, labels = connected_components(graph_final, directed=False)
+    
+    print(f"Found {num_comps} connected wire structures.")
     
     consolidated_vertices = []
     consolidated_edges = []
     consolidated_colors = []
-    
     current_vertex_offset = 0
+    valid_wires_count = 0
     
-    # 3. Process each cluster/wire
-    for wire_id in unique_labels:
-        wire_points = points[labels == wire_id]
+    for comp_id in range(num_comps):
+        comp_nodes_idx = np.where(labels == comp_id)[0]
         
-        # Extract skeleton preserving topology (parallel lines and droppers)
-        # Use a larger max_edge_length to bridge gaps, but rely on directional penalty to avoid cross-connections
-        vertices, wire_edges = extract_skeleton(wire_points, voxel_size=args.bin_size, max_edge_length=max(args.eps * 3, 4.0))
-        
-        if len(vertices) < 2 or len(wire_edges) == 0:
-            continue # Skip noise clusters too small to form a line
+        # Skip tiny isolated fragments
+        if len(comp_nodes_idx) < 10:
+            continue
             
-        wire_color = generate_random_color()
+        valid_wires_count += 1
+        comp_color = generate_random_color()
         
-        # Write individual wire to its own PLY file
-        ind_filepath = os.path.join(individual_dir, f"wire_{wire_id}.ply")
-        write_ply(ind_filepath, vertices, wire_edges)
+        # Extract edges for this component
+        comp_nodes_set = set(comp_nodes_idx)
+        comp_edges = [e for e in final_edges if e[0] in comp_nodes_set and e[1] in comp_nodes_set]
         
-        # Append to consolidated data
-        for v in vertices:
+        # Re-index for the individual file
+        local_map = {old: new for new, old in enumerate(comp_nodes_idx)}
+        local_edges = [[local_map[e[0]], local_map[e[1]]] for e in comp_edges]
+        local_nodes = final_nodes[comp_nodes_idx]
+        
+        ind_filepath = os.path.join(individual_dir, f"wire_{comp_id}.ply")
+        write_ply(ind_filepath, local_nodes, local_edges)
+        
+        # Append to consolidated
+        for v in local_nodes:
             consolidated_vertices.append(v)
-            consolidated_colors.append(wire_color)
+            consolidated_colors.append(comp_color)
             
-        for e in wire_edges:
+        for e in local_edges:
             consolidated_edges.append([e[0] + current_vertex_offset, e[1] + current_vertex_offset])
             
-        current_vertex_offset += len(vertices)
+        current_vertex_offset += len(local_nodes)
         
-    # 4. Save consolidated multi-colored file
+    print(f"Successfully processed {valid_wires_count} valid wire structures.")
     print(f"Saving consolidated file...")
     cons_filepath = os.path.join(output_dir, "consolidated_colored_wires.ply")
     write_ply(cons_filepath, consolidated_vertices, consolidated_edges, consolidated_colors)
