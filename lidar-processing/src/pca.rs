@@ -1,7 +1,7 @@
 use las::Point;
 use kdtree::KdTree;
 use kdtree::distance::squared_euclidean;
-use nalgebra::{Matrix3, SymmetricEigen};
+use nalgebra::{Matrix3, SymmetricEigen, Vector3};
 use std::collections::HashSet;
 
 // Ensemble Filter: Extracts power lines using a combination of geometric metrics.
@@ -16,12 +16,13 @@ pub fn extract_powerlines(points: &Vec<Point>, radius: f64, linearity_threshold:
     }
 
     let radius_sq = radius * radius;
-    let mut main_wires = Vec::new();
-    let mut main_wire_indices = HashSet::new();
+    let mut candidate_main_wires = Vec::new();
+    let mut candidate_main_wire_indices = HashSet::new();
+    let mut wire_directions = Vec::new();
     let mut rejected_indices = Vec::new();
 
     // ----------------------------------------------------------------
-    // PASS 1: Main Wires (Detector A, B, C)
+    // PASS 1: Base Wire Detection (Detector A, B, C)
     // ----------------------------------------------------------------
     for (i, p) in points.iter().enumerate() {
         let neighbors = match tree.within(&[p.x, p.y, p.z], radius_sq, &squared_euclidean) {
@@ -29,7 +30,6 @@ pub fn extract_powerlines(points: &Vec<Point>, radius: f64, linearity_threshold:
             Err(_) => continue,
         };
         
-        // Lowered minimum points to 3 to capture sparse upper catenary wires
         if neighbors.len() < 3 {
             rejected_indices.push(i);
             continue; 
@@ -90,24 +90,92 @@ pub fn extract_powerlines(points: &Vec<Point>, radius: f64, linearity_threshold:
         }
 
         let linearity = (e1 - e2) / e1;
-
-        // Detector B: Thin Structure Filter
         let max_thickness_variance = 0.02;
-
-        // Detector C: Orientation Filter
         let is_horizontal = v1.z.abs() < 0.75; 
 
-        // Detector A: Main Wire
         if linearity >= linearity_threshold && e2 < max_thickness_variance && is_horizontal {
-            main_wires.push(p.clone());
-            main_wire_indices.insert(i);
+            candidate_main_wires.push((i, p.clone()));
+            candidate_main_wire_indices.insert(i);
+            wire_directions.push(Vector3::new(v1.x, v1.y, v1.z));
         } else {
             rejected_indices.push(i);
         }
     }
 
     // ----------------------------------------------------------------
-    // PASS 2: Droppers (Detector F - Hybrid Approach)
+    // PASS 2: Directional "Free Space" Check (Quadrant Density)
+    // ----------------------------------------------------------------
+    let mut main_wires = Vec::new();
+    let mut main_wire_indices = HashSet::new();
+    let isolation_radius_sq = 2.0 * 2.0;
+
+    for (idx, (orig_i, p)) in candidate_main_wires.iter().enumerate() {
+        let neighbors = match tree.within(&[p.x, p.y, p.z], isolation_radius_sq, &squared_euclidean) {
+            Ok(n) => n,
+            Err(_) => {
+                main_wires.push(p.clone());
+                main_wire_indices.insert(*orig_i);
+                continue;
+            }
+        };
+
+        let mut non_wire_points = Vec::new();
+        for &(_dist, &n_idx) in &neighbors {
+            if !candidate_main_wire_indices.contains(&n_idx) {
+                non_wire_points.push(n_idx);
+            }
+        }
+
+        let n_count = non_wire_points.len();
+
+        if n_count > 500 {
+            rejected_indices.push(*orig_i);
+            continue; // Rule 1: Too many non-wire points -> Reject
+        }
+
+        if n_count < 20 {
+            main_wires.push(p.clone());
+            main_wire_indices.insert(*orig_i);
+            continue; // Clean free space
+        }
+
+        // Rule 2: Directional quadrant check
+        let v1 = wire_directions[idx];
+        let mut u = v1.cross(&Vector3::z());
+        if u.norm() < 1e-6 {
+            u = v1.cross(&Vector3::x());
+        }
+        u = u.normalize();
+        let v = v1.cross(&u).normalize();
+
+        let mut q1 = 0;
+        let mut q2 = 0;
+        let mut q3 = 0;
+        let mut q4 = 0;
+
+        for &n_idx in &non_wire_points {
+            let np = &points[n_idx];
+            let d = Vector3::new(np.x - p.x, np.y - p.y, np.z - p.z);
+            let x = d.dot(&u);
+            let y = d.dot(&v);
+
+            if x >= 0.0 && y >= 0.0 { q1 += 1; }
+            else if x < 0.0 && y >= 0.0 { q2 += 1; }
+            else if x < 0.0 && y < 0.0 { q3 += 1; }
+            else { q4 += 1; }
+        }
+
+        let max_q = q1.max(q2).max(q3).max(q4);
+        if (max_q as f64) > 0.8 * (n_count as f64) {
+            rejected_indices.push(*orig_i); // Attached to a solid object on one side
+        } else {
+            main_wires.push(p.clone());
+            main_wire_indices.insert(*orig_i);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // PASS 3: Droppers (Detector F - Hybrid Approach)
     // ----------------------------------------------------------------
     let mut droppers = Vec::new();
     let mut dropper_indices = HashSet::new();
@@ -168,7 +236,7 @@ pub fn extract_powerlines(points: &Vec<Point>, radius: f64, linearity_threshold:
     }
 
     // ----------------------------------------------------------------
-    // PASS 3: Hardware & Junctions (Detector D)
+    // PASS 4: Hardware & Junctions (Detector D)
     // ----------------------------------------------------------------
     let mut junctions = Vec::new();
     if !main_wires.is_empty() || !droppers.is_empty() {
@@ -264,7 +332,7 @@ pub fn extract_powerlines(points: &Vec<Point>, radius: f64, linearity_threshold:
     }
 
     // ----------------------------------------------------------------
-    // POST-PROCESSING: Detector E (Length / Continuity Filter)
+    // POST-PROCESSING: Streetlight Killer (Collinearity Check)
     // ----------------------------------------------------------------
     let mut merged_tree = KdTree::new(3);
     for (i, p) in merged_points.iter().enumerate() {
@@ -275,6 +343,8 @@ pub fn extract_powerlines(points: &Vec<Point>, radius: f64, linearity_threshold:
     let mut final_points = Vec::new();
     let cluster_radius_sq = 1.0 * 1.0; // 1.0m to connect adjacent points in a wire
 
+    let mut clusters = Vec::new();
+
     for i in 0..merged_points.len() {
         if visited[i] { continue; }
 
@@ -282,23 +352,9 @@ pub fn extract_powerlines(points: &Vec<Point>, radius: f64, linearity_threshold:
         let mut stack = vec![i];
         visited[i] = true;
 
-        let mut min_x = merged_points[i].x;
-        let mut max_x = merged_points[i].x;
-        let mut min_y = merged_points[i].y;
-        let mut max_y = merged_points[i].y;
-        let mut min_z = merged_points[i].z;
-        let mut max_z = merged_points[i].z;
-
         while let Some(curr_idx) = stack.pop() {
             let p = &merged_points[curr_idx];
-            cluster.push(p.clone());
-
-            if p.x < min_x { min_x = p.x; }
-            if p.x > max_x { max_x = p.x; }
-            if p.y < min_y { min_y = p.y; }
-            if p.y > max_y { max_y = p.y; }
-            if p.z < min_z { min_z = p.z; }
-            if p.z > max_z { max_z = p.z; }
+            cluster.push(curr_idx);
 
             if let Ok(neighbors) = merged_tree.within(&[p.x, p.y, p.z], cluster_radius_sq, &squared_euclidean) {
                 for &(_dist, &n_idx) in &neighbors {
@@ -309,16 +365,102 @@ pub fn extract_powerlines(points: &Vec<Point>, radius: f64, linearity_threshold:
                 }
             }
         }
+        clusters.push(cluster);
+    }
 
-        // Calculate the bounding box diagonal length of the cluster
+    for cluster in clusters {
+        // Find bounding box to estimate length
+        let mut min_x = merged_points[cluster[0]].x;
+        let mut max_x = min_x;
+        let mut min_y = merged_points[cluster[0]].y;
+        let mut max_y = min_y;
+        let mut min_z = merged_points[cluster[0]].z;
+        let mut max_z = min_z;
+
+        for &idx in &cluster {
+            let p = &merged_points[idx];
+            if p.x < min_x { min_x = p.x; }
+            if p.x > max_x { max_x = p.x; }
+            if p.y < min_y { min_y = p.y; }
+            if p.y > max_y { max_y = p.y; }
+            if p.z < min_z { min_z = p.z; }
+            if p.z > max_z { max_z = p.z; }
+        }
+
         let dx = max_x - min_x;
         let dy = max_y - min_y;
         let dz = max_z - min_z;
         let length = (dx * dx + dy * dy + dz * dz).sqrt();
 
-        // If the cluster is at least 5.0 meters long, it's a valid wire structure
         if length >= 5.0 {
-            final_points.extend(cluster);
+            for &idx in &cluster {
+                final_points.push(merged_points[idx].clone());
+            }
+        } else {
+            // Short cluster (< 5m). Check for collinearity to save fragmented wires.
+            if cluster.len() < 2 { continue; }
+
+            // Find endpoints (max distance pair)
+            let mut max_dist_sq = 0.0;
+            let mut p1_idx = cluster[0];
+            let mut p2_idx = cluster[0];
+
+            // Simple O(N^2) is fine for small clusters
+            for &i1 in &cluster {
+                for &i2 in &cluster {
+                    let pt1 = &merged_points[i1];
+                    let pt2 = &merged_points[i2];
+                    let d_sq = (pt1.x - pt2.x).powi(2) + (pt1.y - pt2.y).powi(2) + (pt1.z - pt2.z).powi(2);
+                    if d_sq > max_dist_sq {
+                        max_dist_sq = d_sq;
+                        p1_idx = i1;
+                        p2_idx = i2;
+                    }
+                }
+            }
+
+            let p1 = &merged_points[p1_idx];
+            let p2 = &merged_points[p2_idx];
+            
+            let dir = Vector3::new(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z);
+            if dir.norm() < 1e-6 { continue; }
+            let dir = dir.normalize();
+
+            let mut has_collinear_neighbor = false;
+            let cluster_set: HashSet<usize> = cluster.iter().cloned().collect();
+
+            // Check rays from p1 and p2
+            for (i, p) in merged_points.iter().enumerate() {
+                if cluster_set.contains(&i) { continue; }
+
+                // Check ray from p2 along dir
+                let v2 = Vector3::new(p.x - p2.x, p.y - p2.y, p.z - p2.z);
+                let proj2 = v2.dot(&dir);
+                if proj2 > 0.0 && proj2 < 10.0 {
+                    let dist_sq = v2.norm_squared() - proj2 * proj2;
+                    if dist_sq < 0.5 * 0.5 {
+                        has_collinear_neighbor = true;
+                        break;
+                    }
+                }
+
+                // Check ray from p1 along -dir
+                let v1 = Vector3::new(p.x - p1.x, p.y - p1.y, p.z - p1.z);
+                let proj1 = v1.dot(&-dir);
+                if proj1 > 0.0 && proj1 < 10.0 {
+                    let dist_sq = v1.norm_squared() - proj1 * proj1;
+                    if dist_sq < 0.5 * 0.5 {
+                        has_collinear_neighbor = true;
+                        break;
+                    }
+                }
+            }
+
+            if has_collinear_neighbor {
+                for &idx in &cluster {
+                    final_points.push(merged_points[idx].clone());
+                }
+            }
         }
     }
 
