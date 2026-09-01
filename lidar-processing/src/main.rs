@@ -44,15 +44,20 @@ fn execute_algorithms(input: &String, output: &String, all_files: &Vec<(String, 
 
     println!("Ground Reduction & Buffer Loading time: {:?} millisecs.", now.elapsed().as_millis());
     
-    // PCA Linearity Filtering
+    // Height-Above-Ground Filter
     let now = time::Instant::now();
-    let linear_points = pca::filter_by_linearity(&combined_points, 20, 0.85); // k=20, threshold=0.85
-    println!("PCA Linearity Filtering time: {:?} millisecs. Extracted {} points from {} total.", now.elapsed().as_millis(), linear_points.len(), combined_points.len());
+    let elevated_points = ground::filter_by_height(&combined_points, 3.0);
+    println!("Height Filter time: {:?} millisecs. Extracted {} points from {} total.", now.elapsed().as_millis(), elevated_points.len(), combined_points.len());
+
+    // Ensemble Filtering (PCA + Thin Structure + Orientation + Junctions)
+    let now = time::Instant::now();
+    let final_points = pca::extract_powerlines(&elevated_points, 1.0, 0.85); // radius=1.0m, threshold=0.85
+    println!("Ensemble Filtering time: {:?} millisecs. Extracted {} points.", now.elapsed().as_millis(), final_points.len());
 
     // Skip the old heuristic pipeline and write the mathematically identified wires directly!
     //Writing output file
     let now = time::Instant::now();
-    io::write_las_flat(&linear_points, readed_items.1, output, original_bounds);
+    io::write_las_flat(&final_points, readed_items.1, output, original_bounds);
     println!("Writing time: {:?} millisecs.", now.elapsed().as_millis());
 }
 
