@@ -49,9 +49,9 @@ fn execute_algorithms(input: &String, output: &String, all_files: &Vec<(String, 
     let elevated_points = ground::filter_by_height(&combined_points, 3.0);
     println!("Height Filter time: {:?} millisecs. Extracted {} points from {} total.", now.elapsed().as_millis(), elevated_points.len(), combined_points.len());
 
-    // Ensemble Filtering (PCA + Thin Structure + Orientation + Junctions)
+    // Ensemble Filtering (PCA + Thin Structure + Orientation + Junctions + Droppers + Length)
     let now = time::Instant::now();
-    let final_points = pca::extract_powerlines(&elevated_points, 1.0, 0.85); // radius=1.0m, threshold=0.85
+    let final_points = pca::extract_powerlines(&elevated_points, 0.3, 0.85); // radius=0.3m, threshold=0.85
     println!("Ensemble Filtering time: {:?} millisecs. Extracted {} points.", now.elapsed().as_millis(), final_points.len());
 
     // Skip the old heuristic pipeline and write the mathematically identified wires directly!
